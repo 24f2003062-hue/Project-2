@@ -1,4 +1,66 @@
-# --- OPTIMIZED MAIN LOGIC (Isse Copy-Paste karo) ---
+import os
+import json
+import requests
+import uvicorn
+import io
+import sys
+import traceback
+import re
+import pandas as pd
+import pypdf
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+from playwright.async_api import async_playwright
+from openai import OpenAI
+
+# --- INITIALIZE APP (Ye line miss ho gayi thi) ---
+app = FastAPI()
+
+# --- 1. CONFIGURATION ---
+AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN")
+MY_SECRET = os.environ.get("MY_SECRET", "hemant_secret_123")
+
+if not AIPIPE_TOKEN:
+    print("⚠️ WARNING: AIPIPE_TOKEN not found! Check Render Environment Variables.")
+
+# AI Pipe Client
+client = OpenAI(
+    api_key=AIPIPE_TOKEN,
+    base_url="https://aipipe.org/openrouter/v1"
+)
+
+class QuizTask(BaseModel):
+    email: str
+    secret: str
+    url: str
+
+# --- 2. WELCOME PAGE ---
+@app.get("/")
+def home():
+    return {
+        "status": "Active",
+        "message": "AI Agent Ready. Send POST to /quiz",
+        "capabilities": ["Web Scraping", "PDF Reading", "Turbo Mode"]
+    }
+
+# --- 3. HELPER: EXECUTE CODE ---
+def execute_python_code(code_str: str):
+    old_stdout = sys.stdout
+    redirected_output = sys.stdout = io.StringIO()
+    exec_globals = {
+        '__name__': '__main__',
+        'requests': requests, 'json': json, 're': re,
+        'pd': pd, 'pypdf': pypdf, 'io': io
+    }
+    try:
+        exec(code_str, exec_globals)
+        return redirected_output.getvalue().strip()
+    except Exception as e:
+        return f"Error: {str(e)}"
+    finally:
+        sys.stdout = old_stdout
+
+# --- 4. MAIN LOGIC (OPTIMIZED TURBO MODE) ---
 async def process_quiz_loop(start_url: str, email: str, secret: str):
     current_url = start_url
     visited_urls = set()
@@ -8,10 +70,9 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
         visited_urls.add(current_url)
         print(f"\n📍 Processing Level: {current_url}")
         try:
-            # A. SCRAPE (OPTIMIZED FOR SPEED)
+            # A. SCRAPE (TURBO BROWSER LAUNCH)
             async with async_playwright() as p:
                 print("⏳ Launching Browser (Turbo Mode)...")
-                # Ye flags browser ko crash hone se bachate hain aur fast karte hain
                 browser = await p.chromium.launch(
                     headless=True,
                     args=[
@@ -28,7 +89,7 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                 page = await browser.new_page()
                 
                 print(f"🌐 Navigating to {current_url}...")
-                # Timeout set kiya taaki latke nahi (30 sec max)
+                # 30 sec timeout taaki latke nahi
                 await page.goto(current_url, timeout=30000, wait_until="domcontentloaded")
                 
                 try: await page.wait_for_selector("body", timeout=5000)
@@ -108,3 +169,13 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
 
         except Exception as e:
             print(f"🔥 Error: {e}"); traceback.print_exc(); current_url = None
+
+# --- 5. API ENDPOINT ---
+@app.post("/quiz")
+async def receive_task(task: QuizTask, background_tasks: BackgroundTasks):
+    if task.secret != MY_SECRET: raise HTTPException(status_code=403, detail="Invalid Secret")
+    background_tasks.add_task(process_quiz_loop, task.url, task.email, task.secret)
+    return {"message": "AI Agent started."}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
