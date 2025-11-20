@@ -1,4 +1,4 @@
-# --- 4. MAIN LOGIC (Copy paste only this function inside main.py) ---
+# --- OPTIMIZED MAIN LOGIC (Isse Copy-Paste karo) ---
 async def process_quiz_loop(start_url: str, email: str, secret: str):
     current_url = start_url
     visited_urls = set()
@@ -8,13 +8,32 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
         visited_urls.add(current_url)
         print(f"\n📍 Processing Level: {current_url}")
         try:
-            # A. SCRAPE
+            # A. SCRAPE (OPTIMIZED FOR SPEED)
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                print("⏳ Launching Browser (Turbo Mode)...")
+                # Ye flags browser ko crash hone se bachate hain aur fast karte hain
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-accelerated-2d-canvas",
+                        "--no-first-run",
+                        "--no-zygote",
+                        "--single-process",
+                        "--disable-gpu"
+                    ]
+                )
                 page = await browser.new_page()
-                await page.goto(current_url)
+                
+                print(f"🌐 Navigating to {current_url}...")
+                # Timeout set kiya taaki latke nahi (30 sec max)
+                await page.goto(current_url, timeout=30000, wait_until="domcontentloaded")
+                
                 try: await page.wait_for_selector("body", timeout=5000)
                 except: pass
+                
                 visible_text = await page.inner_text("body")
                 links = await page.evaluate("""() => {
                     return Array.from(document.querySelectorAll('a')).map(a => a.href);
@@ -22,10 +41,9 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                 await browser.close()
                 print(f"✅ Page Scraped. Found {len(links)} links.")
 
-            # B. ASK AI (STRICT MODE: NO SUBMISSION)
+            # B. ASK AI (STRICT MODE)
             prompt = f"""
             You are an expert Python Data Analyst.
-            
             PAGE CONTENT:
             ---
             {visible_text[:6000]}
@@ -38,22 +56,20 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             3. Identify the Submission URL.
             
             CRITICAL RULES:
-            - **DO NOT SUBMIT DATA**: Do NOT use `requests.post` in your code. Only calculate the value.
-            - **NO PLACEHOLDERS**: Do not use strings like 'your_email' or 'your_secret'.
-            - **OUTPUT FORMAT**: The code must print a JSON string: {{"answer": <calculated_value>, "submission_url": "<url>"}}
-            - **ANSWER TYPE**: The "answer" value must be a String, Number, or List. It CANNOT be a Dictionary/Object.
-            - Use `pd` for CSVs and `pypdf` for PDFs.
+            - **DO NOT SUBMIT DATA**: Do NOT use `requests.post`. Only calculate.
+            - **NO PLACEHOLDERS**: Use REAL links from the list.
+            - **OUTPUT FORMAT**: JSON string: {{"answer": <value>, "submission_url": "<url>"}}
+            - **ANSWER TYPE**: String or Number only.
             - Output ONLY raw Python code.
             """
 
-            print(f"🤖 Asking AI Pipe (Strict Mode)...")
+            print(f"🤖 Asking AI Pipe...")
             response = client.chat.completions.create(
                 model="openai/gpt-4o-mini", 
                 messages=[{"role": "user", "content": prompt}]
             )
             ai_code = response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
-            
-            print(f"📝 AI Generated Code (Snippet):\n{ai_code[:200]}...\n----------------")
+            print(f"📝 AI Code Generated.")
 
             # C. EXECUTE
             execution_result = execute_python_code(ai_code)
@@ -68,7 +84,6 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                     data = json.loads(match.group())
                     answer = data.get("answer")
                     submit_url = data.get("submission_url")
-                    
                     if submit_url and not submit_url.startswith("http"):
                         from urllib.parse import urljoin
                         submit_url = urljoin(current_url, submit_url)
@@ -77,10 +92,7 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             if not submit_url:
                 print("❌ Submission URL not found."); break
             
-            # Check if answer is an object (Dictionary) - prevent recursion error
-            if isinstance(answer, dict):
-                print("⚠️ AI returned a dictionary as answer. Extracting 'message' or converting to string.")
-                answer = str(answer)
+            if isinstance(answer, dict): answer = str(answer)
 
             payload = {"email": email, "secret": secret, "url": current_url, "answer": answer}
             print(f"📤 Submitting to {submit_url} with answer: {answer}")
