@@ -6,6 +6,7 @@ import io
 import sys
 import traceback
 import re
+import asyncio
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
@@ -20,6 +21,7 @@ api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
     print("⚠️ WARNING: OPENAI_API_KEY not found in environment variables!")
 
+# Client initialize karo
 client = OpenAI(api_key=api_key)
 
 # Tumhara Secret Code
@@ -173,6 +175,7 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
 
 @app.post("/quiz")
 async def receive_task(task: QuizTask, background_tasks: BackgroundTasks):
+    print(f"Received request from {task.email}")
     if task.secret != MY_SECRET:
         raise HTTPException(status_code=403, detail="Invalid Secret")
 
