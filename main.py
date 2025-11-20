@@ -6,6 +6,7 @@ import io
 import sys
 import traceback
 import re
+import asyncio
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
@@ -14,9 +15,17 @@ import google.generativeai as genai
 # --- SETUP ---
 app = FastAPI()
 
-# Gemini API Setup (Render ke Environment Variable se Key uthayega)
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-# Hum 'gemini-1.5-flash' use karenge kyunki wo super fast hai
+# Gemini API Setup
+# Render ke Environment Variable se Key uthayega
+api_key = os.environ.get("GEMINI_API_KEY")
+if not api_key:
+    print("⚠️ WARNING: GEMINI_API_KEY not found in environment variables!")
+
+genai.configure(api_key=api_key)
+
+# Model Configuration
+# Hum 'gemini-1.5-flash' use kar rahe hain.
+# Agar requirements.txt updated hai to ye pakka chalega.
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Tumhara Secret Code
@@ -37,8 +46,8 @@ def execute_python_code(code_str: str):
     redirected_output = sys.stdout = io.StringIO()
     
     try:
+        print("🐍 Executing AI Code...")
         # Code execute karo
-        # Global variables pass kar rahe hain taaki imports kaam karein
         exec(code_str, {'__name__': '__main__', 'requests': requests, 'json': json, 're': re})
         result = redirected_output.getvalue()
         return result.strip()
@@ -61,6 +70,7 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
         try:
             # 1. SCRAPE PAGE (The Eyes)
             async with async_playwright() as p:
+                print("browser launching...")
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
                 await page.goto(current_url)
@@ -72,9 +82,10 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                     pass
                 
                 visible_text = await page.inner_text("body") # Visible text
-                # Kabhi kabhi hidden links script tags mein hote hain, wo bhi le lete hain
+                # Kabhi kabhi hidden links script tags mein hote hain
                 page_content = await page.content() 
                 await browser.close()
+                print("✅ Page Scraped Successfully.")
 
             # 2. ASK GEMINI TO SOLVE (The Brain)
             prompt = f"""
@@ -82,7 +93,7 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             Here is the raw text content from a web page quiz:
             
             --- START CONTENT ---
-            {visible_text[:5000]}
+            {visible_text[:6000]}
             --- END CONTENT ---
             
             Your Goal:
@@ -99,18 +110,22 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             - Example of what your code should print: {{"answer": 42, "submission_url": "https://example.com/submit"}}
             """
 
+            print("🤖 Asking Gemini...")
             # Gemini se response mango
             response = model.generate_content(prompt)
             
             # Response clean karo (Markdown hatana)
             ai_code = response.text.replace("```python", "").replace("```", "").strip()
-            print(f"🤖 Gemini Generated Code Logic...")
+            print(f"🤖 Gemini Logic Generated.")
 
             # 3. EXECUTE CODE (The Hands)
             execution_result = execute_python_code(ai_code)
             print(f"⚡ Execution Result: {execution_result}")
 
             # Parse JSON result
+            submit_url = None
+            answer = None
+            
             try:
                 # Kabhi kabhi extra text aa jata hai, sirf JSON wala part dhundte hain
                 json_match = re.search(r'\{.*\}', execution_result, re.DOTALL)
@@ -121,18 +136,18 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                     
                     # Agar URL relative hai (e.g. /submit), to full banao
                     if submit_url and not submit_url.startswith("http"):
-                        # Base URL extract logic (simple version)
-                        base_url = "/".join(current_url.split("/")[:3])
-                        submit_url = base_url + submit_url
+                        # Base URL logic
+                        from urllib.parse import urljoin
+                        submit_url = urljoin(current_url, submit_url)
                 else:
-                    raise Exception("No JSON found in output")
+                    print("⚠️ No JSON found in output")
 
             except Exception as parse_error:
                 print(f"❌ JSON Parsing Failed: {parse_error}")
                 break
 
             if not submit_url:
-                print("❌ Submission URL not found.")
+                print("❌ Submission URL not found. Stopping.")
                 break
 
             # 4. SUBMIT ANSWER
@@ -145,17 +160,20 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             
             print(f"📤 Submitting to {submit_url}...")
             # Timeout add kiya taaki latak na jaye
-            response = requests.post(submit_url, json=payload, timeout=10)
-            res_json = response.json()
-            
-            print(f"✅ Server Response: {res_json}")
+            try:
+                response = requests.post(submit_url, json=payload, timeout=10)
+                res_json = response.json()
+                print(f"✅ Server Response: {res_json}")
 
-            # 5. CHECK FOR NEXT LEVEL
-            if res_json.get("correct") == True and "url" in res_json:
-                current_url = res_json["url"]
-                print("🎉 Correct! Next level loading...")
-            else:
-                print("🏁 Quiz Finished or Wrong Answer.")
+                # 5. CHECK FOR NEXT LEVEL
+                if res_json.get("correct") == True and "url" in res_json:
+                    current_url = res_json["url"]
+                    print("🎉 Correct! Next level loading...")
+                else:
+                    print("🏁 Quiz Finished or Wrong Answer.")
+                    current_url = None
+            except Exception as req_err:
+                print(f"❌ Submission Failed: {req_err}")
                 current_url = None
 
         except Exception as e:
@@ -165,6 +183,8 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
 
 @app.post("/quiz")
 async def receive_task(task: QuizTask, background_tasks: BackgroundTasks):
+    print(f"Incoming Request from: {task.email}")
+    
     # Security Check
     if task.secret != MY_SECRET:
         raise HTTPException(status_code=403, detail="Invalid Secret")
