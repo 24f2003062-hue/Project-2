@@ -5,14 +5,19 @@ import uvicorn
 import io
 import sys
 import traceback
+import re
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
-from openai import OpenAI
+import google.generativeai as genai
 
 # --- SETUP ---
 app = FastAPI()
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))  # Render Environment Variable se lega
+
+# Gemini API Setup (Render ke Environment Variable se Key uthayega)
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Hum 'gemini-1.5-flash' use karenge kyunki wo super fast hai
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Tumhara Secret Code
 MY_SECRET = os.environ.get("MY_SECRET", "default_secret_123") 
@@ -25,7 +30,7 @@ class QuizTask(BaseModel):
 # --- HELPER: EXECUTE AI GENERATED CODE ---
 def execute_python_code(code_str: str):
     """
-    LLM dwara diye gaye code ko execute karta hai aur printed JSON output return karta hai.
+    Gemini dwara diye gaye code ko execute karta hai.
     """
     # Capture standard output
     old_stdout = sys.stdout
@@ -33,7 +38,8 @@ def execute_python_code(code_str: str):
     
     try:
         # Code execute karo
-        exec(code_str, {'__name__': '__main__', 'requests': requests, 'json': json})
+        # Global variables pass kar rahe hain taaki imports kaam karein
+        exec(code_str, {'__name__': '__main__', 'requests': requests, 'json': json, 're': re})
         result = redirected_output.getvalue()
         return result.strip()
     except Exception as e:
@@ -59,63 +65,70 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                 page = await browser.new_page()
                 await page.goto(current_url)
                 
-                # Wait for potential JS rendering
+                # Thoda wait taaki JS load ho jaye
                 try:
                     await page.wait_for_selector("body", timeout=5000)
                 except:
                     pass
                 
-                # Get content
-                content = await page.content() # Full HTML
-                visible_text = await page.inner_text("body") # Clean text
+                visible_text = await page.inner_text("body") # Visible text
+                # Kabhi kabhi hidden links script tags mein hote hain, wo bhi le lete hain
+                page_content = await page.content() 
                 await browser.close()
 
-            # 2. ASK LLM TO SOLVE (The Brain)
-            # Hum LLM ko bolenge: "Code likho jo answer nikal kar JSON print kare"
+            # 2. ASK GEMINI TO SOLVE (The Brain)
             prompt = f"""
-            You are an autonomous data analyst agent.
-            I have a task from a webpage. Here is the visible text and HTML content:
+            You are an expert Python developer and Data Analyst.
+            Here is the raw text content from a web page quiz:
             
-            --- CONTENT START ---
-            {visible_text[:4000]} 
-            --- CONTENT END ---
+            --- START CONTENT ---
+            {visible_text[:5000]}
+            --- END CONTENT ---
             
             Your Goal:
-            1. Identify the Question.
-            2. Identify the Submission URL (it is usually mentioned or inside a script tag).
-            3. Write a PYTHON SCRIPT to calculate the answer.
+            1. Understand the Question asking for a specific answer.
+            2. Find the JSON submission URL (it might be relative or absolute).
+            3. Write a PYTHON SCRIPT to solve the question.
             
-            IMPORTANT INSTRUCTIONS FOR PYTHON SCRIPT:
-            - If the task involves downloading a CSV/PDF, use `requests` to download it.
-            - Perform the calculation (sum, filter, etc.).
-            - PRINT the final output as a valid JSON string with keys: "answer" and "submission_url".
-            - Do NOT use input().
-            - Do NOT print anything else except the final JSON.
-            - Example Output format: {{"answer": 123, "submission_url": "https://example.com/submit"}}
-            
-            Send ONLY the Python code block. No markdown like ```python.
+            IMPORTANT REQUIREMENTS FOR YOUR PYTHON CODE:
+            - The code must calculate the answer.
+            - The code must PRINT the final output as a valid JSON string.
+            - The JSON must have keys: "answer" (the calculated value) and "submission_url" (the url to post to).
+            - Do not use input().
+            - Output ONLY valid Python code. No markdown backticks.
+            - Example of what your code should print: {{"answer": 42, "submission_url": "https://example.com/submit"}}
             """
 
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "system", "content": "You are a Python coding assistant."},
-                          {"role": "user", "content": prompt}],
-                model="gpt-4o-mini", # Cost effective and smart
-            )
-
-            ai_code = chat_completion.choices[0].message.content.replace("```python", "").replace("```", "").strip()
-            print(f"🤖 AI Generated Code Logic...")
+            # Gemini se response mango
+            response = model.generate_content(prompt)
+            
+            # Response clean karo (Markdown hatana)
+            ai_code = response.text.replace("```python", "").replace("```", "").strip()
+            print(f"🤖 Gemini Generated Code Logic...")
 
             # 3. EXECUTE CODE (The Hands)
             execution_result = execute_python_code(ai_code)
             print(f"⚡ Execution Result: {execution_result}")
 
-            # Parse JSON result from AI code
+            # Parse JSON result
             try:
-                result_data = json.loads(execution_result)
-                answer = result_data.get("answer")
-                submit_url = result_data.get("submission_url")
-            except:
-                print("❌ Failed to parse AI output as JSON.")
+                # Kabhi kabhi extra text aa jata hai, sirf JSON wala part dhundte hain
+                json_match = re.search(r'\{.*\}', execution_result, re.DOTALL)
+                if json_match:
+                    result_data = json.loads(json_match.group())
+                    answer = result_data.get("answer")
+                    submit_url = result_data.get("submission_url")
+                    
+                    # Agar URL relative hai (e.g. /submit), to full banao
+                    if submit_url and not submit_url.startswith("http"):
+                        # Base URL extract logic (simple version)
+                        base_url = "/".join(current_url.split("/")[:3])
+                        submit_url = base_url + submit_url
+                else:
+                    raise Exception("No JSON found in output")
+
+            except Exception as parse_error:
+                print(f"❌ JSON Parsing Failed: {parse_error}")
                 break
 
             if not submit_url:
@@ -130,8 +143,9 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                 "answer": answer
             }
             
-            print(f"📤 Submitting to {submit_url}: {payload}")
-            response = requests.post(submit_url, json=payload)
+            print(f"📤 Submitting to {submit_url}...")
+            # Timeout add kiya taaki latak na jaye
+            response = requests.post(submit_url, json=payload, timeout=10)
             res_json = response.json()
             
             print(f"✅ Server Response: {res_json}")
@@ -139,7 +153,7 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             # 5. CHECK FOR NEXT LEVEL
             if res_json.get("correct") == True and "url" in res_json:
                 current_url = res_json["url"]
-                print("🎉 Correct! Moving to next level...")
+                print("🎉 Correct! Next level loading...")
             else:
                 print("🏁 Quiz Finished or Wrong Answer.")
                 current_url = None
@@ -158,7 +172,7 @@ async def receive_task(task: QuizTask, background_tasks: BackgroundTasks):
     # Start Logic in Background
     background_tasks.add_task(process_quiz_loop, task.url, task.email, task.secret)
     
-    return {"message": "Agent started. I will solve this."}
+    return {"message": "Gemini Agent started. I will solve this."}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
