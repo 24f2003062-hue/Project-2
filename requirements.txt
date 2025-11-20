@@ -3,7 +3,7 @@ uvicorn
 requests
 playwright
 pydantic
-google-generativeai
+google-generativeai>=0.7.0
 pandas
 numpy
 beautifulsoup4
