@@ -8,3 +8,5 @@ pandas
 numpy
 beautifulsoup4
 lxml
+pypdf     <-- New for PDF
+openpyxl  <-- New for Excel
