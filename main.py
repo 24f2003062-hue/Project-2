@@ -1,58 +1,76 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 import uvicorn
-import time
+from playwright.async_api import async_playwright
+import requests
+import json
 
-# Initialize the App
 app = FastAPI()
 
 # --- CONFIGURATION ---
-# Ye wo secret code hai jo tum Google Form mein bhi bharoge
-MY_SECRET = "hemant_super_secret_key_2025"
-MY_EMAIL = "tumhara_email@example.com"
+MY_SECRET = "hemant_super_secret_key_2025" # Apni marzi ka secret rakho
 
-# --- DATA MODEL ---
-# Ye define karta hai ki request kaisi dikhni chahiye
 class QuizTask(BaseModel):
     email: str
     secret: str
     url: str
 
-# --- LOGIC ---
-def solve_quiz_logic(task: QuizTask):
-    """
-    Ye function background mein chalega.
-    Abhi hum bas print karenge, baad mein yahan AI logic aayega.
-    """
-    print(f"\n[Background] Task Started for URL: {task.url}")
-    print("[Background] Processing... (yahan scraping aur AI ka kaam hoga)")
+# --- LOGIC: THE EYES (SCRAPING) ---
+async def solve_quiz_logic(task: QuizTask):
+    print(f"\n[Bot] Starting task for: {task.url}")
     
-    # Simulate time taking process (ex: 3 seconds)
-    time.sleep(3)
-    
-    print(f"[Background] Task Finished for {task.url}\n")
-    # Future Step: Yahan se hum answer wapis POST karenge
+    try:
+        async with async_playwright() as p:
+            # 1. Launch Browser (Headless means bina UI ke)
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            
+            # 2. Go to URL
+            print("[Bot] Navigating to URL...")
+            await page.goto(task.url)
+            
+            # 3. Wait for Content (Handle JS Loading)
+            # Problem statement ke hisab se kabhi kabhi content 'result' id mein hota hai
+            # Hum thoda wait karenge taaki JS execute ho jaye
+            try:
+                await page.wait_for_selector("body", timeout=5000) 
+            except:
+                print("[Bot] Warning: Body load timeout, proceeding anyway.")
+
+            # 4. Extract Visible Text (Clean Question)
+            page_content = await page.inner_text("body")
+            print(f"[Bot] SCRAPED CONTENT:\n{page_content}\n----------------")
+
+            # --- Next Steps (Chunks 3 & 4) ---
+            # Yahan hum LLM ko content bhejenge aur answer nikalenge.
+            # Abhi ke liye hum fake answer bhej kar flow test karenge.
+            
+            # Maan lo LLM ne answer "12345" nikala
+            fake_answer = 12345 
+            
+            # NOTE: Submission URL usually page par hi mention hota hai.
+            # Filhal hum assume kar rahe hain ki submission url API response mein nahi mila
+            # to hum hardcode kar rahe hain (Real logic Chunk 3 mein aayega).
+            # Sample k hisab se: https://example.com/submit
+            
+            # Lekin abhi hum submit nahi karenge kyunki real URL nahi hai.
+            # Hum bas logs mein print karke chod denge verify karne k liye.
+            print(f"[Bot] Ready to submit answer: {fake_answer}")
+            
+            await browser.close()
+            
+    except Exception as e:
+        print(f"[Bot] Error in processing: {e}")
 
 # --- API ENDPOINT ---
 @app.post("/quiz")
 async def receive_task(task: QuizTask, background_tasks: BackgroundTasks):
-    print(f"\n[Incoming Request] From: {task.email}")
-
-    # 1. SECURITY CHECK: Kya secret sahi hai?
+    # 1. Verify Secret
     if task.secret != MY_SECRET:
-        print("--> Access Denied: Wrong Secret")
-        # Agar galat hai to 403 error wapis bhejo
-        raise HTTPException(status_code=403, detail="Invalid Secret Code")
+        raise HTTPException(status_code=403, detail="Invalid Secret")
 
-    # 2. START BACKGROUND TASK
-    # Hum server ko bol rahe hain: "Ye logic background mein chalao, user ko wait mat karao"
+    # 2. Start Process
     background_tasks.add_task(solve_quiz_logic, task)
-
-    # 3. IMMEDIATE RESPONSE
-    print("--> Access Granted: 200 OK sent")
-    return {"message": "Task received successfully, processing started."}
-
-# --- RUN SERVER ---
-# Is block ka matlab hai agar ye file direct run ho rahi hai to server start karo
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    # 3. Respond
+    return {"message": "Task received, bot is working on it."}
