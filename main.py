@@ -1,61 +1,4 @@
-import os
-import json
-import requests
-import uvicorn
-import io
-import sys
-import traceback
-import re
-import pandas as pd
-import pypdf
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from pydantic import BaseModel
-from playwright.async_api import async_playwright
-from openai import OpenAI
-
-app = FastAPI()
-
-# --- 1. CONFIGURATION ---
-AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN")
-MY_SECRET = os.environ.get("MY_SECRET", "hemant_secret_123")
-
-if not AIPIPE_TOKEN:
-    print("⚠️ WARNING: AIPIPE_TOKEN not found! Check Render Environment Variables.")
-
-client = OpenAI(
-    api_key=AIPIPE_TOKEN,
-    base_url="https://aipipe.org/openrouter/v1"
-)
-
-class QuizTask(BaseModel):
-    email: str
-    secret: str
-    url: str
-
-# --- 2. WELCOME PAGE ---
-@app.get("/")
-def home():
-    return {"status": "Active", "message": "Bot is Ready to read Data & Links."}
-
-# --- 3. HELPER: EXECUTE CODE ---
-def execute_python_code(code_str: str):
-    old_stdout = sys.stdout
-    redirected_output = sys.stdout = io.StringIO()
-    exec_globals = {
-        '__name__': '__main__',
-        'requests': requests, 'json': json, 're': re,
-        'pd': pd, 'pypdf': pypdf, 'io': io
-    }
-    try:
-        # Execute
-        exec(code_str, exec_globals)
-        return redirected_output.getvalue().strip()
-    except Exception as e:
-        return f"Error: {str(e)}"
-    finally:
-        sys.stdout = old_stdout
-
-# --- 4. MAIN LOGIC ---
+# --- 4. MAIN LOGIC (Copy paste only this function inside main.py) ---
 async def process_quiz_loop(start_url: str, email: str, secret: str):
     current_url = start_url
     visited_urls = set()
@@ -73,16 +16,15 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
                 try: await page.wait_for_selector("body", timeout=5000)
                 except: pass
                 visible_text = await page.inner_text("body")
-                # Extract specific links
                 links = await page.evaluate("""() => {
                     return Array.from(document.querySelectorAll('a')).map(a => a.href);
                 }""")
                 await browser.close()
-                print(f"✅ Page Scraped. Found {len(links)} links: {links}")
+                print(f"✅ Page Scraped. Found {len(links)} links.")
 
-            # B. ASK AI (STRICT MODE)
+            # B. ASK AI (STRICT MODE: NO SUBMISSION)
             prompt = f"""
-            You are an expert Python Developer.
+            You are an expert Python Data Analyst.
             
             PAGE CONTENT:
             ---
@@ -92,26 +34,26 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             
             YOUR TASK:
             1. Identify the Question.
-            2. Identify the Submission URL.
-            3. Write Python code to solve the question.
+            2. Write Python code to CALCULATE the answer.
+            3. Identify the Submission URL.
             
             CRITICAL RULES:
-            - If you need to download a file, YOU MUST USE A LINK FROM THE "AVAILABLE LINKS" LIST ABOVE.
-            - DO NOT use placeholders like 'your_file_url_here'. Use the REAL link.
-            - If downloading a CSV/PDF, use `requests.get(url).content` and process it using `io` and `pd` or `pypdf`.
-            - Output VALID JSON string: {{"answer": <calculated_value>, "submission_url": "<url>"}} at the end.
+            - **DO NOT SUBMIT DATA**: Do NOT use `requests.post` in your code. Only calculate the value.
+            - **NO PLACEHOLDERS**: Do not use strings like 'your_email' or 'your_secret'.
+            - **OUTPUT FORMAT**: The code must print a JSON string: {{"answer": <calculated_value>, "submission_url": "<url>"}}
+            - **ANSWER TYPE**: The "answer" value must be a String, Number, or List. It CANNOT be a Dictionary/Object.
+            - Use `pd` for CSVs and `pypdf` for PDFs.
             - Output ONLY raw Python code.
             """
 
-            print(f"🤖 Asking AI Pipe...")
+            print(f"🤖 Asking AI Pipe (Strict Mode)...")
             response = client.chat.completions.create(
                 model="openai/gpt-4o-mini", 
                 messages=[{"role": "user", "content": prompt}]
             )
             ai_code = response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
             
-            # Log the code to debug
-            print(f"📝 AI Generated Code:\n{ai_code}\n----------------")
+            print(f"📝 AI Generated Code (Snippet):\n{ai_code[:200]}...\n----------------")
 
             # C. EXECUTE
             execution_result = execute_python_code(ai_code)
@@ -133,10 +75,15 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
             except: pass
 
             if not submit_url:
-                print("❌ Submission URL not found in AI output."); break
+                print("❌ Submission URL not found."); break
+            
+            # Check if answer is an object (Dictionary) - prevent recursion error
+            if isinstance(answer, dict):
+                print("⚠️ AI returned a dictionary as answer. Extracting 'message' or converting to string.")
+                answer = str(answer)
 
             payload = {"email": email, "secret": secret, "url": current_url, "answer": answer}
-            print(f"📤 Submitting to {submit_url}...")
+            print(f"📤 Submitting to {submit_url} with answer: {answer}")
             
             res = requests.post(submit_url, json=payload, timeout=10).json()
             print(f"✅ Response: {res}")
@@ -149,12 +96,3 @@ async def process_quiz_loop(start_url: str, email: str, secret: str):
 
         except Exception as e:
             print(f"🔥 Error: {e}"); traceback.print_exc(); current_url = None
-
-@app.post("/quiz")
-async def receive_task(task: QuizTask, background_tasks: BackgroundTasks):
-    if task.secret != MY_SECRET: raise HTTPException(status_code=403, detail="Invalid Secret")
-    background_tasks.add_task(process_quiz_loop, task.url, task.email, task.secret)
-    return {"message": "AI Agent started."}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
