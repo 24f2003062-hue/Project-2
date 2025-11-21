@@ -1,20 +1,40 @@
-# Microsoft ka official Playwright Python image use karenge
-# Isme Python aur Browsers pehle se installed hote hain
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+FROM python:3.10-slim
 
-# Working directory set karo
+# Install system dependencies needed for Playwright
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    git \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libxshmfence1 \
+    libpangocairo-1.0-0 \
+    libpango-1.0-0 \
+    libgtk-3-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Playwright and Browsers
+RUN pip install playwright && playwright install chromium
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+
 WORKDIR /app
 
-# Files copy karo
 COPY requirements.txt .
-COPY main.py .
-
-# Python libraries install karo
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Playwright ke browsers confirm karo (waise base image m hote hain par safe side k liye)
-RUN playwright install chromium
-RUN playwright install-deps
+COPY main.py .
 
-# Server start karo
+EXPOSE 80
+ENV PORT=80
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
